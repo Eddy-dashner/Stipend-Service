@@ -1,0 +1,64 @@
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: stipend-postgres
+    ports:
+      - "5538:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-stipenddb}
+      POSTGRES_USER: ${POSTGRES_USER:-stipend_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - stipend-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stipend_app} -d ${POSTGRES_DB:-stipenddb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  stipend-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stipend-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      SERVER_PORT: "8080"
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-dev}
+      SPRING_DATASOURCE_URL: "jdbc:postgresql://stipend-postgres:5432/${POSTGRES_DB:-stipenddb}"
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-stipend_app}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: "shecancode-kafka:29092"
+      APP_JWT_SECRET: ${APP_JWT_SECRET:-change-this-to-a-long-secure-secret-key-at-least-32-bytes}
+      APP_JWT_ACCESS_TOKEN_EXPIRATION_MS: ${APP_JWT_ACCESS_TOKEN_EXPIRATION_MS:-900000}
+      APP_JWT_REFRESH_TOKEN_EXPIRATION_MS: ${APP_JWT_REFRESH_TOKEN_EXPIRATION_MS:-604800000}
+    networks:
+      - stipend-network
+      - shecancode-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/v3/api-docs || exit 1"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+
+networks:
+  stipend-network:
+    name: stipend-network
+    driver: bridge
+
+  shecancode-network:
+    external: true
+    name: shecancode-network

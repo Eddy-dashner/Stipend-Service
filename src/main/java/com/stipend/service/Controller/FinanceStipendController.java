@@ -4,6 +4,9 @@ import com.stipend.service.DTO.MonthlyStipendPageDTO;
 import com.stipend.service.DTO.MonthlyStipendResponseDTO;
 import com.stipend.service.DTO.ApproveStipendRequestDTO;
 import com.stipend.service.DTO.MarkPaidStipendRequestDTO;
+import com.stipend.service.DTO.BulkApproveStipendsRequestDTO;
+import com.stipend.service.DTO.BulkMarkPaidStipendsRequestDTO;
+import com.stipend.service.DTO.BulkStipendActionResultDTO;
 import com.stipend.service.Enum.StipendStatus;
 import com.stipend.service.service.FinanceStipendReadService;
 import com.stipend.service.service.FinanceStipendWorkflowService;
@@ -109,6 +112,44 @@ public class FinanceStipendController {
     ) {
         return financeStipendWorkflowService.markPaid(
                 stipendId,
+                principal == null ? null : principal.getName(),
+                request
+        );
+    }
+
+    @PatchMapping("/cohorts/{cohortId}/stipends/approve")
+    public BulkStipendActionResultDTO approveCohortStipends(
+            @PathVariable UUID cohortId,
+            @RequestParam int year,
+            @RequestParam int month,
+            @RequestBody(required = false) BulkApproveStipendsRequestDTO request,
+            Principal principal
+    ) {
+        validateYear(year);
+        validateMonth(month);
+        return financeStipendWorkflowService.approveCohortPeriod(
+                cohortId,
+                year,
+                month,
+                principal == null ? null : principal.getName(),
+                request
+        );
+    }
+
+    @PatchMapping("/cohorts/{cohortId}/stipends/mark-paid")
+    public BulkStipendActionResultDTO markCohortStipendsPaid(
+            @PathVariable UUID cohortId,
+            @RequestParam int year,
+            @RequestParam int month,
+            @RequestBody BulkMarkPaidStipendsRequestDTO request,
+            Principal principal
+    ) {
+        validateYear(year);
+        validateMonth(month);
+        return financeStipendWorkflowService.markCohortPeriodPaid(
+                cohortId,
+                year,
+                month,
                 principal == null ? null : principal.getName(),
                 request
         );

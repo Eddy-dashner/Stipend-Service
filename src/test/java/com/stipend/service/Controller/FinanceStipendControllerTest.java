@@ -2,6 +2,9 @@ package com.stipend.service.Controller;
 
 import com.stipend.service.DTO.MonthlyStipendPageDTO;
 import com.stipend.service.DTO.MonthlyStipendResponseDTO;
+import com.stipend.service.DTO.BulkApproveStipendsRequestDTO;
+import com.stipend.service.DTO.BulkMarkPaidStipendsRequestDTO;
+import com.stipend.service.DTO.BulkStipendActionResultDTO;
 import com.stipend.service.Enum.StipendStatus;
 import com.stipend.service.Exception.FinancePrincipalRequiredException;
 import com.stipend.service.service.FinanceStipendWorkflowService;
@@ -165,5 +168,81 @@ class FinanceStipendControllerTest {
                         .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
                         .content("{\"paymentReference\":\"payment-123\",\"paidAt\":\"2026-09-05T14:30:00Z\"}"))
                 .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void bulkApprovePassesCohortPeriodPrincipalAndBody() throws Exception {
+        UUID cohortId = UUID.randomUUID();
+        when(workflowService.approveCohortPeriod(eq(cohortId), eq(2026), eq(10), eq("finance.user"),
+                eq(new BulkApproveStipendsRequestDTO("Reviewed", 25))))
+                .thenReturn(new BulkStipendActionResultDTO(cohortId, 2026, 10, StipendStatus.APPROVED,
+                        25, List.of(), java.util.Map.of(StipendStatus.PAID, 2L)));
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .patch("/api/v1/cohorts/{cohortId}/stipends/approve", cohortId)
+                        .param("year", "2026")
+                        .param("month", "10")
+                        .principal(() -> "finance.user")
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                        .content("{\"comment\":\"Reviewed\",\"expectedCount\":25}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.updatedCount").value(25))
+                .andExpect(jsonPath("$.newStatus").value("APPROVED"))
+                .andExpect(jsonPath("$.notUpdatedByStatus.PAID").value(2));
+    }
+
+    @Test
+    void bulkMarkPaidPassesBatchReference() throws Exception {
+        UUID cohortId = UUID.randomUUID();
+        java.time.Instant paidAt = java.time.Instant.parse("2026-11-05T09:00:00Z");
+        when(workflowService.markCohortPeriodPaid(eq(cohortId), eq(2026), eq(10), eq("finance.user"),
+                eq(new BulkMarkPaidStipendsRequestDTO("MTN-BATCH-1", paidAt, null))))
+                .thenReturn(new BulkStipendActionResultDTO(cohortId, 2026, 10, StipendStatus.PAID,
+                        3, List.of(), java.util.Map.of()));
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .patch("/api/v1/cohorts/{cohortId}/stipends/mark-paid", cohortId)
+                        .param("year", "2026")
+                        .param("month", "10")
+                        .principal(() -> "finance.user")
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                        .content("{\"paymentReference\":\"MTN-BATCH-1\",\"paidAt\":\"2026-11-05T09:00:00Z\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.updatedCount").value(3));
+    }
+
+    @Test
+    void bulkActionsRejectInvalidPeriodAndMissingBody() throws Exception {
+        UUID cohortId = UUID.randomUUID();
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .patch("/api/v1/cohorts/{cohortId}/stipends/approve", cohortId)
+                        .param("year", "2026")
+                        .param("month", "13"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .patch("/api/v1/cohorts/{cohortId}/stipends/approve", cohortId)
+                        .param("year", "2026"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .patch("/api/v1/cohorts/{cohortId}/stipends/mark-paid", cohortId)
+                        .param("year", "2026")
+                        .param("month", "10"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void bulkExpectedCountMismatchReturnsConflict() throws Exception {
+        UUID cohortId = UUID.randomUUID();
+        when(workflowService.approveCohortPeriod(any(), anyInt(), anyInt(), any(), any()))
+                .thenThrow(new InvalidStipendTransitionException("Expected 25 CALCULATED stipends but found 24"));
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .patch("/api/v1/cohorts/{cohortId}/stipends/approve", cohortId)
+                        .param("year", "2026")
+                        .param("month", "10")
+                        .principal(() -> "finance.user")
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                        .content("{\"expectedCount\":25}"))
+                .andExpect(status().isConflict());
     }
 }

@@ -210,4 +210,28 @@ class FinanceRepositoryIntegrationTest {
                 .paymentPercentage(new BigDecimal(percentage))
                 .build();
     }
+
+    @Test
+    void locksOnlyCohortPeriodStipendsInRequestedStatus() {
+        UUID cohortId = UUID.randomUUID();
+        UUID first = saveStudent("Ava", "Mugenzi", cohortId);
+        UUID second = saveStudent("Noah", "Uwase", cohortId);
+        UUID third = saveStudent("Mia", "Iradukunda", cohortId);
+        saveStipend(first, cohortId, 2026, 10, StipendStatus.CALCULATED);
+        saveStipend(second, cohortId, 2026, 10, StipendStatus.CALCULATED);
+        saveStipend(third, cohortId, 2026, 10, StipendStatus.PAID);
+        saveStipend(first, cohortId, 2026, 9, StipendStatus.CALCULATED);
+        saveStipend(first, UUID.randomUUID(), 2026, 11, StipendStatus.CALCULATED);
+
+        var locked = monthlyStipendRepository.findCohortPeriodByStatusForUpdate(
+                cohortId, 2026, 10, StipendStatus.CALCULATED);
+
+        assertThat(locked).hasSize(2)
+                .allSatisfy(stipend -> {
+                    assertThat(stipend.getCohortId()).isEqualTo(cohortId);
+                    assertThat(stipend.getStipendMonth()).isEqualTo(10);
+                    assertThat(stipend.getStatus()).isEqualTo(StipendStatus.CALCULATED);
+                });
+        assertThat(locked).extracting(MonthlyStipend::getId).isSorted();
+    }
 }

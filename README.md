@@ -1,5 +1,31 @@
 # Stipend-Service
 
+## Run everything with Docker
+
+Start attendance’s shared Kafka broker first, from the workspace root:
+
+```sh
+docker compose -f shecancode-attendance-system/docker-compose.yaml up -d --wait kafka
+```
+
+Attendance owns the `shecancode-network` network and Kafka broker. Stipend joins
+that external network and runs only its own application and PostgreSQL. The two
+databases remain separate. Start the attendance application separately when needed.
+
+From this directory, run `docker compose up -d --build --wait --wait-timeout 300`.
+This builds the Java application and starts it with PostgreSQL using the
+local `dev` profile. Check status with `docker compose ps` and view application
+logs with `docker compose logs -f stipend-app`.
+
+The API is at http://localhost:8080, Swagger UI is at
+http://localhost:8080/swagger-ui/index.html, PostgreSQL is on localhost:5538,
+and the shared Kafka broker is on localhost:9092. Optional overrides can be placed in `.env`
+using `.env.example` as a starting point. The bundled defaults are for local development.
+
+Stop the stack with `docker compose down`. PostgreSQL data is retained in a
+named volume across restarts. Stopping stipend does not stop the shared broker.
+Stop stipend before taking down the attendance stack, which owns the shared network.
+
 ## Service role and architecture
 
 Stipend Service is one microservice in a larger system. It uses an event-driven architecture: upstream services publish student-registration, attendance, and student-status events to Kafka, and this service consumes those events, validates and deduplicates them, and maintains its own PostgreSQL data for stipend processing. Student Registration Service remains the source of truth for cohort eligibility, monthly base amount, and currency. This service derives attendance-adjusted monthly stipend records from the consumed data and cohort policy; registration is not performed through an HTTP endpoint here.
@@ -18,20 +44,20 @@ Kafka consumers use Spring Kafka's `ErrorHandlingDeserializer` and a bounded ret
 
 ### Inspect and manually replay Kafka dead-letter records
 
-The bundled Kafka container is named `stipend-kafka`. List the service's dead-letter topics:
+The shared attendance Kafka container is named `shecancode-kafka`. List the service's dead-letter topics:
 
 ```sh
-docker exec stipend-kafka kafka-topics \
+docker exec shecancode-kafka kafka-topics \
   --bootstrap-server localhost:29092 --list \
-  | grep -E '^(registration-events|student-status-events|attendance-events)\.DLT$'
+  | grep -E '^(student-registration-events|student-status-events|attendance-events)\.DLT$'
 ```
 
 Inspect each topic without deleting or advancing a consumer group's offsets. The console consumer prints the DLT record's key, partition, and offset; Spring Kafka's dead-letter headers include the original topic, partition, offset, and exception details.
 
 ```sh
-for topic in registration-events.DLT student-status-events.DLT attendance-events.DLT; do
+for topic in student-registration-events.DLT student-status-events.DLT attendance-events.DLT; do
   echo "=== $topic ==="
-  docker exec stipend-kafka kafka-console-consumer \
+  docker exec shecancode-kafka kafka-console-consumer \
     --bootstrap-server localhost:29092 \
     --topic "$topic" \
     --from-beginning \
@@ -45,7 +71,7 @@ done
 
 Treat DLT payloads and exception headers as potentially sensitive because registration events contain student details; restrict access to terminal logs and redact them before sharing.
 
-There is no automated replay command/tool yet. For a manually approved replay, first capture the original key, value, headers, and DLT metadata; diagnose and correct the cause; then publish only that record's corrected event value to its original source topic (`registration-events`, `student-status-events`, or `attendance-events`). Keep the original DLT record intact. Preserve its `eventId` and event version (and key, if present); do not generate a new ID/version to bypass deduplication. The service records processed event IDs transactionally and rejects stale attendance/status versions, which helps prevent duplicate business effects, but operators must still verify the replay result in service logs/data before replaying another record. Never replay a whole DLT topic blindly.
+There is no automated replay command/tool yet. For a manually approved replay, first capture the original key, value, headers, and DLT metadata; diagnose and correct the cause; then publish only that record's corrected event value to its original source topic (`student-registration-events`, `student-status-events`, or `attendance-events`). Keep the original DLT record intact. Preserve its `eventId` and event version (and key, if present); do not generate a new ID/version to bypass deduplication. The service records processed event IDs transactionally and rejects stale attendance/status versions, which helps prevent duplicate business effects, but operators must still verify the replay result in service logs/data before replaying another record. Never replay a whole DLT topic blindly.
 
 `StipendPolicy` and `StipendTier` are JPA entities in `src/main/java/com/stipend/service/Model/`; their records are stored in the `stipend_policies` and `stipend_tiers` database tables, not in a policy file. When a student registration event arrives, `StudentRegistrationService` creates and saves a default enabled policy for the cohort if none exists. The policy starts on the cohort start date and applies attendance tiers: below 85% = 50%, 85%–89.99% = 75%, 90%–94.99% = 90%, and 95%–100% = 100%. Existing cohort policies are not overwritten on registration. Run `src/main/resources/db/manual-migrations/005_attendance_based_stipend_policy.sql` once on an existing database to replace the old absence-count tiers for all stored policies and add the attendance calculation fields; new databases created from the current entities do not need this migration. The migration intentionally replaces stored policy tiers with the approved Igire tiers. Existing cohorts without a policy are not backfilled automatically.
 
@@ -53,7 +79,7 @@ Stipend Service applies the monthly attendance tiers and payment formula only. T
 
 `MonthlyStipendService.calculateMonthlyStipend(YearMonth)` calculates a month for active, stipend-eligible students whose cohort overlaps the period. It infers scheduled cohort days from distinct attendance dates recorded for any student in the cohort; therefore, the event source must publish at least one attendance record for every scheduled class date. Each missing participant/date record is treated as an unauthorized full-day absence. A daily status contributes 1 credited day for `PRESENT`, 0.5 for `LATE` or `APPROVED_HALF_DAY`, 0 for `ABSENT`, and is excluded from eligible days for approved full-day `EXCUSED`. `LATE` contributes 0.5 unauthorized absence day, `ABSENT` and missing records contribute 1, and approved statuses contribute none. The persisted `absenceCount` and `unauthorizedAbsenceDays` both report this fractional unauthorized-absence total; for example, two full absences and one late arrival are reported as 2.5 days. For multiple records on a date, the latest updated record (then highest event version) is used. Monthly attendance is credited attendance days divided by eligible days. The stipend is monthly base amount × eligible days ÷ scheduled days × the effective attendance-tier percentage, rounded to two decimal places using `HALF_UP`. Each calculation persists the scheduled and eligible days, credited days, attendance percentage, and unauthorized absence days for review. On existing databases, apply `src/main/resources/db/manual-migrations/006_fractional_stipend_absence_count.sql` after `005_attendance_based_stipend_policy.sql` to store the fractional count and align it with existing unauthorized-absence totals. `MonthlyStipendScheduler` runs daily at 02:00 in `app.registration.business-time-zone` (default `Africa/Kigali`). It waits until the second day of the month before calculating the preceding month, giving the last day to finish; it retries unrecorded past periods on later runs and recalculates the most recently closed period daily during the following month to incorporate late Kafka events. A database run marker, unique by stipend period and scheduler date, makes overlapping instances claim the same run only once; the marker and stipend writes commit together, so failed calculations can be retried. The cron is configurable with `app.stipend.calculation.cron`. On existing databases, apply `src/main/resources/db/manual-migrations/004_monthly_stipend_calculation_runs.sql` before enabling this scheduler version. Finance read DTOs, services, and GET endpoints provide stipend and policy reads, including student names, cohort details, attendance inputs, adjusted amount, currency, and period boundaries. Approval and payment transitions are also implemented; JWT authorization and policy management/update are not yet implemented.
 
-Student registration is accepted through the Kafka `registration-events` topic. There is no HTTP student-registration endpoint, avoiding a second write path that could bypass event validation and processed-event idempotency. Kafka bootstrap/group settings should also be consolidated: `KafkaConsumerConfig` currently hard-codes `localhost:9092` and a group ID, while the application configuration and Compose environment provide configurable values.
+Student registration is accepted through the Kafka `student-registration-events` topic. There is no HTTP student-registration endpoint, avoiding a second write path that could bypass event validation and processed-event idempotency. Kafka bootstrap and registration consumer-group settings are supplied through application configuration; Compose points the service at `shecancode-kafka:29092`.
 
 The stories below track implementation status. A story is complete only when its acceptance criteria are implemented and tested.
 
@@ -156,6 +182,8 @@ Acceptance criteria:
 ### US-9: Implement approval and payment workflow
 The workflow supports approving a calculated stipend and marking an approved stipend as paid. `PATCH /api/v1/stipends/{stipendId}/approve` records the servlet principal name, optional approval comment, and approval timestamp. `PATCH /api/v1/stipends/{stipendId}/mark-paid` records the servlet principal name, required payment reference, and paid timestamp. Both transitions lock the stipend row and update it transactionally; only `CALCULATED → APPROVED` and `APPROVED → PAID` are allowed. Invalid or repeated transitions return `409 Conflict`, and invalid request bodies return `400 Bad Request`. JWT authentication and finance-role authorization are not configured yet (US-10); until then, these routes are not protected for production use and approval requires a principal supplied by the deployment.
 
+Bulk actions cover a whole cohort month: `PATCH /api/v1/cohorts/{cohortId}/stipends/approve?year=&month=` approves every `CALCULATED` stipend, and `PATCH /api/v1/cohorts/{cohortId}/stipends/mark-paid?year=&month=` marks every `APPROVED` stipend paid with one batch `paymentReference` and `paidAt`. Each runs in one transaction with the rows locked; stipends in other statuses are left unchanged and counted in `notUpdatedByStatus`. An optional `expectedCount` in the body makes the request fail with 409, changing nothing, if the number of matching stipends differs from what the caller reviewed.
+
 Acceptance criteria:
 - ✅ Implement the approval and mark-paid PATCH endpoints.
 - ✅ Allow only `CALCULATED → APPROVED` and `APPROVED → PAID` transitions.
@@ -176,10 +204,13 @@ Acceptance criteria:
 ### <mark>🟡 US-10: Secure finance endpoints with JWT</mark>
 As an operator, I want finance endpoints protected by JWT authentication and role-based authorization so that stipend and payment data is only accessible to authorized users.
 
+Access tokens are issued by the attendance service's auth module (`POST /api/v1/auth/login`) and validated here as an OAuth2 resource server (`security/SecurityConfig.java`). Both services must share `APP_JWT_SECRET`; the HMAC algorithm follows jjwt's key-length rule (≥64 bytes HS512, ≥48 HS384, otherwise HS256; minimum 32 bytes). Authorities come from the token's `roles` claim (e.g. `ROLE_ADMIN`). All `/api/v1/**` GETs, approval, mark-paid, and `/api/dev/**` require one of `app.security.finance-roles` (default `ADMIN,FINANCE`; override with `APP_SECURITY_FINANCE_ROLES`). The token subject is recorded as `approvedBy`. Swagger and `/v3/api-docs` stay public; any other route is denied.
+
 Acceptance criteria:
-- <mark>Add Spring Security and configure JWT validation using the agreed identity provider and issuer.</mark>
-- <mark>Require the finance role for stipend and policy API endpoints.</mark>
-- <mark>Return consistent 401 and 403 responses.</mark>
+- ✅ Add Spring Security and configure JWT validation using the attendance service's tokens.
+- ✅ Require the finance role for stipend and policy API endpoints.
+- <mark>Return consistent 401 and 403 responses (currently Spring's default empty body with `WWW-Authenticate`).</mark>
+- <mark>Add a `FINANCE` role to the attendance service; until then only `ADMIN` tokens can be issued for finance users.</mark>
 - <mark>Configure CORS only for approved dashboard origins and test access-control rules.</mark>
 
 ### <mark>🟡 US-11: Standardize API error responses</mark>
@@ -205,7 +236,7 @@ Acceptance criteria:
 As an operator, I want the event-driven registration path and Kafka settings to behave consistently across local and container deployments.
 
 Acceptance criteria:
-- ✅ Use Kafka `registration-events` as the sole supported student-registration write path; the redundant `POST /api/students` endpoint has been removed.
+- ✅ Use Kafka `student-registration-events` as the sole supported student-registration write path; the redundant `POST /api/students` endpoint has been removed.
 - ✅ Keep the OpenAPI description explicit that student registration is not exposed as an HTTP write endpoint.
 - <mark>Remove hard-coded Kafka bootstrap servers and consumer group IDs; use Spring configuration for both local and Compose deployments.</mark>
 - <mark>Add a startup/configuration test that verifies the effective Kafka settings and listener container wiring.</mark>
@@ -217,14 +248,15 @@ Acceptance criteria:
 - Java 17 is the project target (`maven.compiler.source` and `maven.compiler.target`). The current Maven build has been run with Maven 3.9.9; use Maven 3.9.x.
 - Run `mvn -Dtest=KafkaRetryConfigTest,AttendanceKafkaRetryIntegrationTest test` to verify Kafka retry and dead-letter behavior using the embedded Kafka test broker.
 - PostgreSQL must be available with a database named `stipenddb` and a user that can create/update tables. The bundled Docker Compose setup publishes PostgreSQL on `localhost:5538`; a separately installed PostgreSQL can use the default `localhost:5432`.
-- Kafka must be available at `localhost:9092`. The consumers read registration, status, and attendance events from `registration-events`, `student-status-events`, and `attendance-events`, respectively.
+- Kafka must be available at `localhost:9092`. The consumers read registration, status, and attendance events from `student-registration-events`, `student-status-events`, and `attendance-events`, respectively.
 
 ### Configure and run
 
 Start the bundled PostgreSQL and Kafka services:
 
 ```sh
-docker compose up -d postgres kafka
+docker compose -f ../../shecancode-attendance-system/docker-compose.yaml up -d --wait kafka
+docker compose up -d postgres
 ```
 
 For the bundled PostgreSQL container, set its default local credentials and published host port before starting the service. Override the example password for any non-local use; do not commit credentials:
@@ -276,8 +308,8 @@ For a complete local business-flow walkthrough with Postman requests and sample 
 With the services and app running, publish a registration event (the service creates the default cohort policy if one does not exist):
 
 ```sh
-docker exec -i stipend-kafka kafka-console-producer \
-  --bootstrap-server localhost:29092 --topic registration-events <<'EOF'
+docker exec -i shecancode-kafka kafka-console-producer \
+  --bootstrap-server localhost:29092 --topic student-registration-events <<'EOF'
 {"eventId":"10000000-0000-0000-0000-000000000001","studentId":"20000000-0000-0000-0000-000000000001","firstName":"Alex","lastName":"Example","programId":"30000000-0000-0000-0000-000000000001","cohortId":"40000000-0000-0000-0000-000000000001","registeredAt":"2025-01-01T08:00:00Z","cohortStartDate":"2025-01-01T00:00:00Z","cohortEndDate":"2025-12-31T00:00:00Z","registrationDate":"2025-01-01T08:00:00Z","stipendEligible":true,"monthlyStipendAmount":40000.00,"stipendCurrency":"RWF","version":1}
 EOF
 ```
@@ -285,7 +317,7 @@ EOF
 After registration is consumed, publish three attendance records. These create three observed cohort class dates; two are present and one is absent:
 
 ```sh
-docker exec -i stipend-kafka kafka-console-producer \
+docker exec -i shecancode-kafka kafka-console-producer \
   --bootstrap-server localhost:29092 --topic attendance-events <<'EOF'
 {"eventId":"50000000-0000-0000-0000-000000000001","attendanceId":"60000000-0000-0000-0000-000000000001","studentId":"20000000-0000-0000-0000-000000000001","programId":"30000000-0000-0000-0000-000000000001","cohortId":"40000000-0000-0000-0000-000000000001","attendanceStatus":"PRESENT","attendanceDate":"2025-01-02","timestamp":"2025-01-02T16:00:00Z","version":1}
 {"eventId":"50000000-0000-0000-0000-000000000002","attendanceId":"60000000-0000-0000-0000-000000000002","studentId":"20000000-0000-0000-0000-000000000001","programId":"30000000-0000-0000-0000-000000000001","cohortId":"40000000-0000-0000-0000-000000000001","attendanceStatus":"ABSENT","attendanceDate":"2025-01-03","timestamp":"2025-01-03T16:00:00Z","version":1}
@@ -312,7 +344,7 @@ The first returns the current month's stipend rows; the second returns that stud
 
 ## Student Registration integration handoff
 
-Student Registration Service is the source of truth for student identity, program/cohort membership, registration dates, stipend eligibility, base amount, and currency. It must publish a complete registration snapshot to Kafka topic `registration-events` whenever a student is registered or one of those values changes. Stipend Service does not expose a student-registration HTTP write endpoint.
+Student Registration Service is the source of truth for student identity, program/cohort membership, registration dates, stipend eligibility, base amount, and currency. It must publish a complete registration snapshot to Kafka topic `student-registration-events` whenever a student is registered or one of those values changes. Stipend Service does not expose a student-registration HTTP write endpoint.
 
 The JSON event shape is `StudentRegisteredEvent`:
 
@@ -351,22 +383,22 @@ Example event (use real IDs and current values in integration):
 }
 ```
 
-For a change, publish the full event again with the same `studentId`, a new `eventId`, updated fields, and the next source version. Send it to `registration-events` using the broker address for the producer's network (`localhost:9092` from the host or `kafka:29092` from the shared Compose network). If no stipend policy exists for the cohort, the first registration event creates the enabled default policy. Later registration events do not overwrite an existing policy.
+For a change, publish the full event again with the same `studentId`, a new `eventId`, updated fields, and the next source version. Send it to `student-registration-events` using the broker address for the producer's network (`localhost:9092` from the host or `shecancode-kafka:29092` from the shared Compose network). If no stipend policy exists for the cohort, the first registration event creates the enabled default policy. Later registration events do not overwrite an existing policy.
 
 ### Test after Student Registration changes
 
 1. Start PostgreSQL and Kafka, then run Stipend Service with the `dev` profile as described in [Local development setup](#local-development-setup). Wait for the application startup log before publishing events. Set `DB_USERNAME`, `DB_PASSWORD`, and `DB_URL` to match the local database.
-2. Have Student Registration publish the complete event to `registration-events`. For a local smoke test from the host, the Kafka console producer can also publish the JSON directly:
+2. Have Student Registration publish the complete event to `student-registration-events`. For a local smoke test from the host, the Kafka console producer can also publish the JSON directly:
 
    ```sh
-   docker exec -i stipend-kafka kafka-console-producer \
+   docker exec -i shecancode-kafka kafka-console-producer \
      --bootstrap-server localhost:29092 \
-     --topic registration-events <<'EOF'
+     --topic student-registration-events <<'EOF'
    {"eventId":"10000000-0000-0000-0000-000000000001","studentId":"20000000-0000-0000-0000-000000000001","firstName":"Alex","lastName":"Example","programId":"30000000-0000-0000-0000-000000000001","cohortId":"40000000-0000-0000-0000-000000000001","registeredAt":"2025-01-01T08:00:00Z","cohortStartDate":"2025-01-01T00:00:00Z","cohortEndDate":"2025-12-31T00:00:00Z","registrationDate":"2025-01-01T08:00:00Z","stipendEligible":true,"monthlyStipendAmount":40000.00,"stipendCurrency":"RWF","version":1}
    EOF
    ```
 
-   Use a fresh `eventId` and appropriate next version for every repeat/change. A successful consume is logged with the event and student IDs. Invalid events are sent to `registration-events.DLT`; see [Inspect and manually replay Kafka dead-letter records](#inspect-and-manually-replay-kafka-dead-letter-records).
+   Use a fresh `eventId` and appropriate next version for every repeat/change. A successful consume is logged with the event and student IDs. Invalid events are sent to `student-registration-events.DLT`; see [Inspect and manually replay Kafka dead-letter records](#inspect-and-manually-replay-kafka-dead-letter-records).
 3. Confirm the policy exists with `GET http://localhost:8080/api/v1/stipend-policies?cohortId=<cohortId>`. If the cohort already has a policy, registration updates do not replace its tiers.
 4. Ensure the Attendance/Program Management service has published one attendance record for every scheduled cohort class date in the target month to `attendance-events`. The sample attendance payloads and statuses are in [POSTMAN_LOCAL_TESTING.md](POSTMAN_LOCAL_TESTING.md). The scheduled-day denominator is inferred from distinct cohort attendance dates; a missing student/date is treated as an unauthorized full-day absence.
 5. Trigger a development calculation for the month:
@@ -415,7 +447,7 @@ Stipend statuses are `CALCULATED`, `NEEDS_RECALCULATION`, `APPROVED`, `PAID`, an
 
 - Student registration and attendance are Kafka write integrations, not browser APIs. There is no student-list/detail endpoint, attendance-edit endpoint, policy-write endpoint, or production calculation-trigger endpoint yet.
 - The manual calculation route `POST /api/dev/stipends/calculate?period=YYYY-MM` is development-profile only; the UI should use persisted finance GET routes rather than rely on it in production.
-- JWT authentication, finance-role authorization, and CORS are not configured. Finance read routes are currently open, while approval/payment routes cannot be exercised locally without middleware that supplies a servlet principal. Do not expose this service directly to an untrusted browser or deploy this configuration as production security.
+- Finance routes require an attendance-service JWT with a finance role (see US-10). CORS is not configured, so a browser dashboard on another origin cannot call the API yet. Replace the default `APP_JWT_SECRET` before any shared deployment.
 - Policy GET routes expose rules for display, but policy editing is not implemented. Registration events create a cohort's default policy only when one does not already exist.
 - The current API has no bulk cohort/student lookup for filter controls. Until an upstream directory API is available, the UI needs cohort/student IDs supplied by its parent system or another agreed lookup service.
 

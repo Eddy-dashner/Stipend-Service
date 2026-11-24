@@ -12,6 +12,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -20,6 +21,23 @@ public interface MonthlyStipendRepository extends JpaRepository<MonthlyStipend, 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select stipend from MonthlyStipend stipend where stipend.id = :stipendId")
     Optional<MonthlyStipend> findByIdForUpdate(@Param("stipendId") UUID stipendId);
+
+    /** Locks a cohort period's stipends in one status, in id order to avoid lock-order deadlocks. */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("""
+            select stipend from MonthlyStipend stipend
+            where stipend.cohortId = :cohortId
+              and stipend.stipendYear = :year
+              and stipend.stipendMonth = :month
+              and stipend.status = :status
+            order by stipend.id
+            """)
+    List<MonthlyStipend> findCohortPeriodByStatusForUpdate(
+            @Param("cohortId") UUID cohortId,
+            @Param("year") int year,
+            @Param("month") int month,
+            @Param("status") StipendStatus status
+    );
 
     Optional<MonthlyStipend> findByStudentIdAndStipendYearAndStipendMonth(
             UUID studentId,

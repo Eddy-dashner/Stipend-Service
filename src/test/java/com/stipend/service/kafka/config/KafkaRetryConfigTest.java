@@ -47,7 +47,7 @@ class KafkaRetryConfigTest {
 
         assertArrayEquals(
                 malformedPayload,
-                serializer.serialize("registration-events.DLT", malformedPayload)
+                serializer.serialize("student-registration-events.DLT", malformedPayload)
         );
         serializer.close();
     }

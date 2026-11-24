@@ -31,7 +31,10 @@ public class KafkaConsumerConfig {
         props.put(org.apache.kafka.clients.consumer.ConsumerConfig.GROUP_ID_CONFIG, registrationGroup);
         props.put(org.apache.kafka.clients.consumer.ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 
-        JsonDeserializer<StudentRegisteredEvent> deserializer = new JsonDeserializer<>(StudentRegisteredEvent.class);
+        // useHeadersIfPresent=false: the producer's __TypeId__ header names its own
+        // class (not on this classpath), so always bind to the local event type.
+        JsonDeserializer<StudentRegisteredEvent> deserializer =
+                new JsonDeserializer<>(StudentRegisteredEvent.class, false);
         deserializer.setRemoveTypeHeaders(false);
         deserializer.addTrustedPackages("*");
         deserializer.setUseTypeMapperForKey(false);

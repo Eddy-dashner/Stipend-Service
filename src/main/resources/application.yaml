@@ -13,8 +13,10 @@ spring:
       properties:
         spring.deserializer.key.delegate.class: org.apache.kafka.common.serialization.StringDeserializer
         spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
-        spring.kafka.consumer.properties.spring.json.trusted.packages: com.stipend.service.Event
-        spring.kafka.consumer.properties.spring.json.use.type.headers: false
+        # Producers (e.g. the attendance service) add a __TypeId__ header naming their
+        # own classes. Ignore it and bind to each listener's local default type instead.
+        spring.json.trusted.packages: com.stipend.service.Event
+        spring.json.use.type.headers: false
 
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
@@ -27,9 +29,18 @@ spring:
       ack-mode: record
 
 app:
+  jwt:
+    # Must equal the attendance service's app.jwt.secret (APP_JWT_SECRET), which
+    # issues the access tokens. The default is for local development only.
+    secret: ${APP_JWT_SECRET:change-this-to-a-long-secure-secret-key-at-least-32-bytes}
+
+  security:
+    # Roles (without the ROLE_ prefix) allowed to read stipends and approve/pay them.
+    finance-roles: ${APP_SECURITY_FINANCE_ROLES:ADMIN,FINANCE}
+
   kafka:
     topics:
-      registration: registration-events
+      registration: student-registration-events
       student-status: student-status-events
       attendance: attendance-events
 

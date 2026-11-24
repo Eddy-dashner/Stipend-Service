@@ -44,5 +44,4 @@ public class DevelopmentStipendCalculationController {
     public ResponseEntity<MonthlyStipendResponseDTO> getStipendByStudentId(@RequestParam UUID studentId) {
         return ResponseEntity.of(developmentStipendService.calculateAndGetCurrentMonthStipend(studentId));
     }
-
 }
