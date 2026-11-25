@@ -59,3 +59,12 @@ app:
   stipend:
     calculation:
       cron: "0 0 2 * * *"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      show-details: never
